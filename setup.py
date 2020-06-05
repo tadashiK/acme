@@ -54,12 +54,8 @@ testing_requirements = [
     'pytest-xdist',
 ]
 
-# Use the first paragraph of our README as the long_description.
-with open('README.md', 'r') as fh:
-  long_description = fh.read().split('\n\n')[4]
-
 # Add a link to github.
-long_description += '\n\nFor more information see our '
+long_description = 'For more information see our '
 long_description += '[github repository](https://github.com/deepmind/acme).'
 
 setup(
