@@ -24,13 +24,13 @@ from acme.adders import reverb as adders
 from acme.agents.jax.impala import acting
 from acme.agents.jax.impala import learning
 from acme.agents.jax.impala import types
-from acme.networks import jax as networks
+from acme.jax import networks
+from acme.jax import variable_utils
 from acme.utils import counting
-from acme.utils import jax_variable_utils
 from acme.utils import loggers
-
 import dm_env
 import haiku as hk
+import jax
 from jax.experimental import optix
 import numpy as np
 import reverb
@@ -42,8 +42,9 @@ class IMPALA(acme.Actor):
   def __init__(
       self,
       environment_spec: specs.EnvironmentSpec,
-      network: networks.PolicyValueRNN,
-      initial_state_fn: Callable[[], networks.RNNState],
+      forward_fn: networks.PolicyValueRNN,
+      unroll_fn: networks.PolicyValueRNN,
+      initial_state_fn: Callable[[], hk.LSTMState],
       sequence_length: int,
       sequence_period: int,
       counter: counting.Counter = None,
@@ -61,8 +62,19 @@ class IMPALA(acme.Actor):
 
     num_actions = environment_spec.actions.num_values
     self._logger = logger or loggers.TerminalLogger('agent')
+
+    extra_spec = {
+        'core_state':
+            hk.without_apply_rng(
+                hk.transform(initial_state_fn, apply_rng=True)).apply(None),
+        'logits':
+            np.ones(shape=(num_actions,), dtype=np.float32)
+    }
+    signature = adders.SequenceAdder.signature(environment_spec, extra_spec)
     queue = reverb.Table.queue(
-        name=adders.DEFAULT_PRIORITY_TABLE, max_size=max_queue_size)
+        name=adders.DEFAULT_PRIORITY_TABLE,
+        max_size=max_queue_size,
+        signature=signature)
     self._server = reverb.Server([queue], port=None)
     self._can_sample = lambda: queue.can_sample(batch_size)
     address = f'localhost:{self._server.port}'
@@ -75,30 +87,25 @@ class IMPALA(acme.Actor):
     )
 
     # The dataset object to learn from.
-    extra_spec = {
-        'core_state': hk.transform(initial_state_fn).apply(None),
-        'logits': np.ones(shape=(num_actions,), dtype=np.float32)
-    }
     # Remove batch dimensions.
     dataset = datasets.make_reverb_dataset(
-        client=reverb.TFClient(address),
+        server_address=address,
         environment_spec=environment_spec,
         batch_size=batch_size,
         extra_spec=extra_spec,
         sequence_length=sequence_length)
 
-    rng = hk.PRNGSequence(seed)
-
     optimizer = optix.chain(
         optix.clip_by_global_norm(max_gradient_norm),
         optix.adam(learning_rate),
     )
+
     self._learner = learning.IMPALALearner(
         obs_spec=environment_spec.observations,
-        network=network,
+        unroll_fn=unroll_fn,
         initial_state_fn=initial_state_fn,
         iterator=dataset.as_numpy_iterator(),
-        rng=rng,
+        rng=hk.PRNGSequence(seed),
         counter=counter,
         logger=logger,
         optimizer=optimizer,
@@ -108,12 +115,14 @@ class IMPALA(acme.Actor):
         max_abs_reward=max_abs_reward,
     )
 
-    variable_client = jax_variable_utils.VariableClient(
-        self._learner, key='policy')
+    variable_client = variable_utils.VariableClient(self._learner, key='policy')
     self._actor = acting.IMPALAActor(
-        network=network,
+        forward_fn=jax.jit(
+            hk.without_apply_rng(hk.transform(forward_fn,
+                                              apply_rng=True)).apply,
+            backend='cpu'),
         initial_state_fn=initial_state_fn,
-        rng=rng,
+        rng=hk.PRNGSequence(seed),
         adder=adder,
         variable_client=variable_client,
     )

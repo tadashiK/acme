@@ -1,16 +1,11 @@
-# Acme
+# Overview
+
+[**Components**](components.md) | [**FAQ**](faq.md)
 
 Acme is a library of reinforcement learning (RL) agents and agent building
 blocks. Overall Acme strives to expose simple, efficient, and readable agent
 baselines while still providing enough flexibility to create novel
 implementations.
-
-## Links
-
--   [Components](components.md)
--   [FAQ](faq.md)
-
-## Overview
 
 The design of Acme attempts to provide multiple points of entry to the RL
 problem at differing levels of complexity. The first entry-point &mdash; and
@@ -51,7 +46,7 @@ while True:
     actor.update()
 ```
 
-> NOTE: Currently in Acme the default method for observing data we make use of 
+> :information_source: Currently in Acme the default method for observing data we make use of 
 > utilizes of observe/observe_last methods (reverse of the above). This is
 > being phased out in favor of the above, which will soon be made the
 > default.

@@ -19,19 +19,16 @@ from typing import Mapping, Sequence
 
 from absl import app
 from absl import flags
-
 import acme
-from acme import networks
 from acme import specs
 from acme import types
 from acme import wrappers
-from acme.agents import actors_tf2 as actors
-from acme.agents import d4pg
-from acme.utils import tf2_utils
-
+from acme.agents.tf import actors
+from acme.agents.tf import d4pg
+from acme.tf import networks
+from acme.tf import utils as tf2_utils
 from dm_control import suite
 import dm_env
-
 import numpy as np
 import sonnet as snt
 
@@ -101,7 +98,7 @@ def main(_):
       environment_spec=environment_spec,
       policy_network=agent_networks['policy'],
       critic_network=agent_networks['critic'],
-      observation_network=agent_networks['observation'],
+      observation_network=agent_networks['observation'],  # pytype: disable=wrong-arg-types
   )
 
   # Create the environment loop used for training.

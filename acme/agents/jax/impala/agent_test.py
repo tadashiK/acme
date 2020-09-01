@@ -22,7 +22,7 @@ from absl.testing import absltest
 import acme
 from acme import specs
 from acme.agents.jax import impala
-from acme.networks import jax as networks
+from acme.jax import networks
 from acme.testing import fakes
 
 import haiku as hk
@@ -36,7 +36,7 @@ class MyNetwork(hk.RNNCore):
   def __init__(self, num_actions: int):
     super().__init__(name='my_network')
     self._torso = hk.Sequential([
-        lambda x: jnp.reshape(x, [jnp.prod(x.shape)]),
+        lambda x: jnp.reshape(x, [np.prod(x.shape)]),
         hk.nets.MLP([50, 50]),
     ])
     self._core = hk.LSTM(20)
@@ -64,7 +64,7 @@ class IMPALATest(absltest.TestCase):
         episode_length=10)
     spec = specs.make_environment_spec(environment)
 
-    def network(x, s):
+    def forward_fn(x, s):
       model = MyNetwork(spec.actions.num_values)
       return model(x, s)
 
@@ -72,11 +72,16 @@ class IMPALATest(absltest.TestCase):
       model = MyNetwork(spec.actions.num_values)
       return model.initial_state(batch_size)
 
+    def unroll_fn(inputs, state):
+      model = MyNetwork(spec.actions.num_values)
+      return hk.static_unroll(model, inputs, state)
+
     # Construct the agent.
     agent = impala.IMPALA(
         environment_spec=spec,
-        network=network,
+        forward_fn=forward_fn,
         initial_state_fn=initial_state_fn,
+        unroll_fn=unroll_fn,
         sequence_length=3,
         sequence_period=3,
         batch_size=6,

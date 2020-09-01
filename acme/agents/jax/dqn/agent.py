@@ -18,12 +18,11 @@
 from acme import datasets
 from acme import specs
 from acme.adders import reverb as adders
-from acme.agents import actors_jax
 from acme.agents import agent
+from acme.agents.jax import actors
 from acme.agents.jax.dqn import learning
-from acme.networks import jax as networks
-from acme.utils import jax_variable_utils
-
+from acme.jax import networks
+from acme.jax import variable_utils
 import haiku as hk
 from jax.experimental import optix
 import jax.numpy as jnp
@@ -56,6 +55,7 @@ class DQN(agent.Agent):
       epsilon: float = 0.,
       learning_rate: float = 1e-3,
       discount: float = 0.99,
+      seed: int = 1,
   ):
     """Initialize the agent."""
 
@@ -66,7 +66,9 @@ class DQN(agent.Agent):
         sampler=reverb.selectors.Prioritized(priority_exponent),
         remover=reverb.selectors.Fifo(),
         max_size=max_replay_size,
-        rate_limiter=reverb.rate_limiters.MinSize(1))
+        rate_limiter=reverb.rate_limiters.MinSize(1),
+        signature=adders.NStepTransitionAdder.signature(
+            environment_spec=environment_spec))
     self._server = reverb.Server([replay_table], port=None)
 
     # The adder is used to insert observations into replay.
@@ -78,7 +80,7 @@ class DQN(agent.Agent):
 
     # The dataset provides an interface to sample from replay.
     dataset = datasets.make_reverb_dataset(
-        client=reverb.TFClient(address),
+        server_address=address,
         environment_spec=environment_spec,
         batch_size=batch_size,
         prefetch_size=prefetch_size,
@@ -86,14 +88,15 @@ class DQN(agent.Agent):
 
     def policy(params: hk.Params, key: jnp.ndarray,
                observation: jnp.ndarray) -> jnp.ndarray:
-      action_values = hk.transform(network).apply(params, observation)
+      action_values = hk.without_apply_rng(
+          hk.transform(network, apply_rng=True)).apply(params, observation)
       return rlax.epsilon_greedy(epsilon).sample(key, action_values)
 
     # The learner updates the parameters (and initializes them).
     learner = learning.DQNLearner(
         network=network,
         obs_spec=environment_spec.observations,
-        rng=hk.PRNGSequence(1),
+        rng=hk.PRNGSequence(seed),
         optimizer=optix.adam(learning_rate),
         discount=discount,
         importance_sampling_exponent=importance_sampling_exponent,
@@ -102,11 +105,11 @@ class DQN(agent.Agent):
         replay_client=reverb.Client(address),
     )
 
-    variable_client = jax_variable_utils.VariableClient(learner, 'foo')
+    variable_client = variable_utils.VariableClient(learner, '')
 
-    actor = actors_jax.FeedForwardActor(
+    actor = actors.FeedForwardActor(
         policy=policy,
-        rng=hk.PRNGSequence(1),
+        rng=hk.PRNGSequence(seed),
         variable_client=variable_client,
         adder=adder)
 

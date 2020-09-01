@@ -15,44 +15,49 @@
 
 """IMPALA actor implementation."""
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from acme import adders
 from acme import core
 from acme.agents.jax.impala import types
-from acme.networks import jax as networks
-from acme.utils import jax_variable_utils
-
+from acme.jax import networks
+from acme.jax import variable_utils
 import dm_env
 import haiku as hk
 import jax
 import jax.numpy as jnp
 
 
+_LogitsAndValue = Tuple[networks.Logits, networks.Value]
+PolicyValueFn = Callable[[hk.Params, types.Observation, hk.LSTMState],
+                         Tuple[_LogitsAndValue, hk.LSTMState]]
+
+
 class IMPALAActor(core.Actor):
   """A recurrent actor."""
 
-  _state: networks.RNNState
-  _prev_state: networks.RNNState
+  _state: hk.LSTMState
+  _prev_state: hk.LSTMState
   _prev_logits: jnp.ndarray
 
   def __init__(
       self,
-      network: networks.PolicyValueRNN,
-      initial_state_fn: Callable[[], networks.RNNState],
+      forward_fn: PolicyValueFn,
+      initial_state_fn: Callable[[], hk.LSTMState],
       rng: hk.PRNGSequence,
-      variable_client: jax_variable_utils.VariableClient,
+      variable_client: variable_utils.VariableClient,
       adder: Optional[adders.Adder] = None,
   ):
 
     # Store these for later use.
     self._adder = adder
     self._variable_client = variable_client
-    self._network = jax.jit(hk.transform(network).apply, backend='cpu')
+    self._forward = forward_fn
     self._rng = rng
 
     self._params = variable_client.update_and_wait()
-    self._initial_state = hk.transform(initial_state_fn).apply(None)
+    self._initial_state = hk.without_apply_rng(
+        hk.transform(initial_state_fn, apply_rng=True)).apply(None)
 
   def select_action(self, observation: types.Observation) -> types.Action:
 
@@ -60,7 +65,7 @@ class IMPALAActor(core.Actor):
       self._state = self._initial_state
 
     # Forward.
-    (logits, _), new_state = self._network(self._variable_client.params,
+    (logits, _), new_state = self._forward(self._variable_client.params,
                                            observation, self._state)
 
     self._prev_logits = logits

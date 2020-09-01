@@ -19,7 +19,8 @@ Minimal implementations of fake Acme components which can be instantiated in
 order to test or interact with other components.
 """
 
-from typing import List, Sequence
+import threading
+from typing import List, Sequence, Optional
 
 from acme import core
 from acme import specs
@@ -27,6 +28,8 @@ from acme import types
 
 import dm_env
 import numpy as np
+import reverb
+import tensorflow as tf
 import tree
 
 
@@ -61,11 +64,16 @@ class Actor(core.Actor):
 class VariableSource(core.VariableSource):
   """Fake variable source."""
 
-  def __init__(self, variables: types.NestedArray = None):
+  def __init__(self,
+               variables: types.NestedArray = None,
+               barrier: threading.Barrier = None):
     # Add dummy variables so we can expose them in get_variables.
     self._variables = {'policy': [] if not variables else variables}
+    self._barrier = barrier
 
   def get_variables(self, names: List[str]) -> List[types.NestedArray]:
+    if self._barrier is not None:
+      self._barrier.wait()
     return [self._variables[name] for name in names]
 
 
@@ -79,10 +87,18 @@ class Environment(dm_env.Environment):
       episode_length: int = 25,
   ):
     # Assert that the discount spec is a BoundedArray with range [0, 1].
-    if (not isinstance(spec.discounts, specs.BoundedArray) or
-        not np.isclose(spec.discounts.minimum, 0) or
-        not np.isclose(spec.discounts.maximum, 1)):
-      raise ValueError('discount_spec must be a BoundedArray in [0, 1].')
+    def check_discount_spec(path, discount_spec):
+      if (not isinstance(discount_spec, specs.BoundedArray) or
+          not np.isclose(discount_spec.minimum, 0) or
+          not np.isclose(discount_spec.maximum, 1)):
+        if path:
+          path_str = ' ' + '/'.join(str(p) for p in path)
+        else:
+          path_str = ''
+        raise ValueError(
+            'discount_spec {}isn\'t a BoundedArray in [0, 1].'.format(path_str))
+
+    tree.map_structure_with_path(check_discount_spec, spec.discounts)
 
     self._spec = spec
     self._episode_length = episode_length
@@ -146,25 +162,30 @@ class DiscreteEnvironment(Environment):
                num_observations: int = 1,
                action_dtype=np.int32,
                obs_dtype=np.int32,
-               reward_dtype=np.float32,
                obs_shape: Sequence[int] = (),
+               discount_spec: Optional[types.NestedSpec] = None,
+               reward_spec: Optional[types.NestedSpec] = None,
                **kwargs):
     """Initialize the environment."""
+    if reward_spec is None:
+      reward_spec = specs.Array((), np.float32)
+
+    if discount_spec is None:
+      discount_spec = specs.BoundedArray((), np.float32, 0.0, 1.0)
+
     actions = specs.DiscreteArray(num_actions, dtype=action_dtype)
     observations = specs.BoundedArray(
         shape=obs_shape,
         dtype=obs_dtype,
         minimum=obs_dtype(0),
         maximum=obs_dtype(num_observations - 1))
-    rewards = specs.Array((), reward_dtype)
-    discounts = specs.BoundedArray((), reward_dtype, 0.0, 1.0)
 
     super().__init__(
         spec=specs.EnvironmentSpec(
             observations=observations,
             actions=actions,
-            rewards=rewards,
-            discounts=discounts),
+            rewards=reward_spec,
+            discounts=discount_spec),
         **kwargs)
 
 
@@ -220,3 +241,35 @@ def _validate_spec(spec: types.NestedSpec, value: types.NestedArray):
 def _generate_from_spec(spec: types.NestedSpec) -> types.NestedArray:
   """Generate a value from a potentially nested spec."""
   return tree.map_structure(lambda s: s.generate_value(), spec)
+
+
+def transition_dataset(environment: dm_env.Environment) -> tf.data.Dataset:
+  """Fake dataset of Reverb N-step transition samples.
+
+  Args:
+    environment: Used to create a fake transition by looking at the
+      observation, action, discount and reward specs.
+
+  Returns:
+    tf.data.Dataset that produces the same fake N-step transition ReverSample
+    object indefinitely.
+  """
+
+  observation = environment.observation_spec().generate_value()
+  action = environment.action_spec().generate_value()
+  reward = environment.reward_spec().generate_value()
+  discount = environment.discount_spec().generate_value()
+  data = (observation, action, reward, discount, observation)
+
+  key = np.array(0, np.uint64)
+  probability = np.array(1.0, np.float64)
+  table_size = np.array(1, np.int64)
+  priority = np.array(1.0, np.float64)
+  info = reverb.SampleInfo(
+      key=key,
+      probability=probability,
+      table_size=table_size,
+      priority=priority)
+  sample = reverb.ReplaySample(info=info, data=data)
+
+  return tf.data.Dataset.from_tensors(sample).repeat()

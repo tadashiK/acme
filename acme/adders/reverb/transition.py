@@ -21,14 +21,18 @@ into a single transition, simplifying to a simple transition adder when N=1.
 
 import copy
 import itertools
-
+import operator
 from typing import Optional
 
+from acme import specs
+from acme import types
 from acme.adders.reverb import base
 from acme.adders.reverb import utils
+from acme.utils import tree_utils
 
 import numpy as np
 import reverb
+import tree
 
 
 class NStepTransitionAdder(base.ReverbAdder):
@@ -106,7 +110,7 @@ class NStepTransitionAdder(base.ReverbAdder):
     """
     # Makes the additional discount a float32, which means that it will be
     # upcast if rewards/discounts are float64 and left alone otherwise.
-    self._discount = np.float32(discount)
+    self._discount = tree.map_structure(np.float32, discount)
 
     super().__init__(
         client=client,
@@ -127,23 +131,58 @@ class NStepTransitionAdder(base.ReverbAdder):
     extras = self._buffer[0].extras
     next_observation = self._next_observation
 
-    # Initialize the n-step return and the discount accumulators. We make a
-    # copy of the first reward/discount so that when we add/multiply in place
-    # it won't change the actual reward or discount.
-    n_step_return = copy.deepcopy(self._buffer[0].reward)
-    total_discount = copy.deepcopy(self._buffer[0].discount)
+    # Give the same tree structure to the n-step return accumulator,
+    # n-step discount accumulator, and self.discount, so that they can be
+    # iterated in parallel using tree.map_structure.
+    (n_step_return,
+     total_discount,
+     self_discount) = tree_utils.broadcast_structures(
+         self._buffer[0].reward,
+         self._buffer[0].discount,
+         self._discount)
+
+    # Copy total_discount, so that accumulating into it doesn't affect
+    # _buffer[0].discount.
+    total_discount = tree.map_structure(np.copy, total_discount)
+
+    # Broadcast n_step_return to have the broadcasted shape of
+    # reward * discount. Also copy, to avoid accumulating into
+    # _buffer[0].reward.
+    n_step_return = tree.map_structure(
+        lambda r, d: np.copy(np.broadcast_to(r, np.broadcast(r, d).shape)),
+        n_step_return,
+        total_discount)
 
     # NOTE: total discount will have one less discount than it does
     # step.discounts. This is so that when the learner/update uses an additional
     # discount we don't apply it twice. Inside the following loop we will
     # apply this right before summing up the n_step_return.
     for step in itertools.islice(self._buffer, 1, None):
-      total_discount *= self._discount
-      n_step_return += step.reward * total_discount
-      total_discount *= step.discount
+      (step_discount,
+       step_reward,
+       total_discount) = tree_utils.broadcast_structures(
+           step.discount,
+           step.reward,
+           total_discount)
 
-    transition = (observation, action, n_step_return, total_discount,
-                  next_observation, extras)
+      # Equivalent to: `total_discount *= self._discount`.
+      tree.map_structure(operator.imul, total_discount, self_discount)
+
+      # Equivalent to: `n_step_return += step.reward * total_discount`.
+      tree.map_structure(lambda nsr, sr, td: operator.iadd(nsr, sr * td),
+                         n_step_return,
+                         step_reward,
+                         total_discount)
+
+      # Equivalent to: `total_discount *= step.discount`.
+      tree.map_structure(operator.imul, total_discount, step_discount)
+
+    if extras:
+      transition = (observation, action, n_step_return, total_discount,
+                    next_observation, extras)
+    else:
+      transition = (observation, action, n_step_return, total_discount,
+                    next_observation)
 
     # Create a list of steps.
     final_step = utils.final_step_like(self._buffer[0], next_observation)
@@ -164,3 +203,55 @@ class NStepTransitionAdder(base.ReverbAdder):
     while self._buffer:
       self._write()
       self._buffer.popleft()
+
+  @classmethod
+  def signature(cls,
+                environment_spec: specs.EnvironmentSpec,
+                extras_spec: types.NestedSpec = ()):
+
+    # This function currently assumes that self._discount is a scalar.
+    # If it ever becomes a nested structure and/or a np.ndarray, this method
+    # will need to know its structure / shape. This is because the signature
+    # discount shape is the environment's discount shape and this adder's
+    # discount shape broadcasted together. Also, the reward shape is this
+    # signature discount shape broadcasted together with the environment
+    # reward shape. As long as self._discount is a scalar, it will not affect
+    # either the signature discount shape nor the signature reward shape, so we
+    # can ignore it.
+
+    rewards_spec, step_discounts_spec = tree_utils.broadcast_structures(
+        environment_spec.rewards,
+        environment_spec.discounts)
+    rewards_spec = tree.map_structure(_broadcast_specs,
+                                      rewards_spec,
+                                      step_discounts_spec)
+    step_discounts_spec = tree.map_structure(copy.deepcopy, step_discounts_spec)
+
+    transition_spec = [
+        environment_spec.observations,
+        environment_spec.actions,
+        rewards_spec,
+        step_discounts_spec,
+        environment_spec.observations,  # next_observation
+    ]
+
+    if extras_spec:
+      transition_spec.append(extras_spec)
+
+    return tree.map_structure_with_path(base.spec_like_to_tensor_spec,
+                                        tuple(transition_spec))
+
+
+def _broadcast_specs(*args: specs.Array) -> specs.Array:
+  """Like np.broadcast, but for specs.Array.
+
+  Args:
+    *args: one or more specs.Array instances.
+
+  Returns:
+    A specs.Array with the broadcasted shape and dtype of the specs in *args.
+  """
+  bc_info = np.broadcast(*tuple(a.generate_value() for a in args))
+  dtype = np.result_type(*tuple(a.dtype for a in args))
+  return specs.Array(shape=bc_info.shape, dtype=dtype)
+

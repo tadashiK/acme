@@ -15,7 +15,18 @@
 
 """Utilities for testing Reverb adders."""
 
+from typing import Any, Sequence, Tuple, Union
+
+from absl.testing import absltest
+from acme import specs
+from acme.adders.reverb import base
 import dm_env
+import numpy as np
+import tensorflow as tf
+import tree
+
+Step = Union[Tuple[Any, dm_env.TimeStep],  # Without extras
+             Tuple[Any, dm_env.TimeStep, Any]]  # With extras
 
 
 class FakeWriter:
@@ -41,7 +52,10 @@ class FakeWriter:
     assert not self.closed, 'Trying to use closed Writer'
     assert num_timesteps <= len(self.timesteps)
     assert num_timesteps <= self.max_sequence_length
-    self.priorities.append((table, self.timesteps[-num_timesteps:], priority))
+    item = self.timesteps[-num_timesteps:]
+    if num_timesteps == 1:
+      item = item[0]
+    self.priorities.append((table, item, priority))
 
   def close(self):
     assert not self.closed, 'Trying to use closed Writer'
@@ -83,10 +97,128 @@ def make_sequence(observations):
   first, steps = make_trajectory(observations)
   observation = first.observation
   sequence = []
+  start_of_episode = True
   for action, timestep in steps:
     extras = ()
-    sequence.append(
-        (observation, action, timestep.reward, timestep.discount, extras))
+    sequence.append((observation, action, timestep.reward, timestep.discount,
+                     start_of_episode, extras))
     observation = timestep.observation
-  sequence.append((observation, 0, 0.0, 0.0, ()))
+    start_of_episode = False
+  sequence.append((observation, 0, 0.0, 0.0, False, ()))
   return sequence
+
+
+def _numeric_to_spec(x: Union[float, int, np.ndarray]):
+  if isinstance(x, np.ndarray):
+    return specs.Array(shape=x.shape, dtype=x.dtype)
+  elif isinstance(x, (float, int)):
+    return specs.Array(shape=(), dtype=type(x))
+  else:
+    raise ValueError(f'Unsupported numeric: {type(x)}')
+
+
+class AdderTestMixin(absltest.TestCase):
+  """A helper mixin for testing Reverb adders.
+
+  Note that any test inheriting from this mixin must also inherit from something
+  that provides the Python unittest assert methods.
+  """
+
+  client: FakeClient
+
+  def setUp(self):
+    super().setUp()
+    self.client = FakeClient()
+
+  def run_test_adder(self,
+                     adder: base.ReverbAdder,
+                     first: dm_env.TimeStep,
+                     steps: Sequence[Step],
+                     expected_items: Sequence[Any]):
+    """Runs a unit test case for the adder.
+
+    Args:
+      adder: The instance of `base.ReverbAdder` that is being tested.
+      first: The first `dm_env.TimeStep` that is used to call
+        `base.ReverbAdder.add_first()`.
+      steps: A sequence of (action, timestep) tuples that are passed to
+        `base.ReverbAdder.add()`.
+      expected_items: The sequence of items that are expected to be created
+        by calling the adder's `add_first()` method on `first` and `add()` on
+        all of the elements in `steps`.
+    """
+    if not steps:
+      raise ValueError('At least one step must be given.')
+
+    has_extras = len(steps[0]) == 3
+    env_spec = tree.map_structure(
+        _numeric_to_spec,
+        specs.EnvironmentSpec(
+            observations=steps[0][1].observation,
+            actions=steps[0][0],
+            rewards=steps[0][1].reward,
+            discounts=steps[0][1].discount))
+    if has_extras:
+      extras_spec = tree.map_structure(_numeric_to_spec, steps[0][2])
+    else:
+      extras_spec = ()
+    signature = adder.signature(env_spec, extras_spec=extras_spec)
+
+    # Add all the data up to the final step.
+    adder.add_first(first)
+    for step in steps[:-1]:
+      action, ts = step[0], step[1]
+
+      if has_extras:
+        extras = step[2]
+      else:
+        extras = ()
+
+      adder.add(action, next_timestep=ts, extras=extras)
+
+    if len(steps) == 1:
+      # adder.add() has not been called yet, so no writers have been created.
+      self.assertEmpty(self.client.writers)
+    else:
+      # Make sure the writer has been created but not closed.
+      self.assertLen(self.client.writers, 1)
+      self.assertFalse(self.client.writers[0].closed)
+
+    # Add the final step.
+    adder.add(*steps[-1])
+
+    # Ending the episode should close the writer. No new writer should yet have
+    # been created as it is constructed lazily.
+    self.assertLen(self.client.writers, 1)
+    self.assertTrue(self.client.writers[0].closed)
+
+    # Make sure our expected and observed data match.
+    observed_items = [p[1] for p in self.client.writers[0].priorities]
+    for expected_item, observed_item in zip(expected_items, observed_items):
+      # Set check_types=False because
+      tree.map_structure(
+          np.testing.assert_array_almost_equal,
+          expected_item,
+          observed_item,
+          check_types=False)
+
+    def _check_signature(spec: tf.TensorSpec, value):
+      # Convert int/float to numpy arrays of dtype np.int64 and np.float64.
+      value = np.asarray(value)
+      self.assertTrue(spec.is_compatible_with(tf.convert_to_tensor(value)))
+
+    for step in self.client.writers[0].timesteps:
+      tree.map_structure(_check_signature, signature, step)
+
+    # Add the start of a second trajectory.
+    adder.add_first(first)
+    adder.add(*steps[0])
+
+    # Make sure this creates an new writer.
+    self.assertLen(self.client.writers, 2)
+    # The writer is closed if the recently added `dm_env.TimeStep`'s' step_type
+    # is `dm_env.StepType.LAST`.
+    if steps[0][1].last():
+      self.assertTrue(self.client.writers[1].closed)
+    else:
+      self.assertFalse(self.client.writers[1].closed)

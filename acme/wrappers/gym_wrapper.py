@@ -75,7 +75,7 @@ class GymWrapper(dm_env.Environment):
     """Returns the wrapped environment."""
     return self._environment
 
-  def __getattr__(self, name):
+  def __getattr__(self, name: str):
     # Expose any other attributes of the underlying environment.
     return getattr(self._environment, name)
 
@@ -179,4 +179,4 @@ class GymAtariAdapter(GymWrapper):
             specs.Array(shape=(), dtype=np.dtype('float64'), name='lives'))
 
   def action_spec(self) -> List[specs.BoundedArray]:
-    return [self._action_spec]
+    return [self._action_spec]  # pytype: disable=bad-return-type

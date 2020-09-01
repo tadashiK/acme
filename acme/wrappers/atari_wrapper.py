@@ -17,7 +17,8 @@
 
 from typing import Tuple, List, Optional, Sequence, Union
 
-from acme import types
+from acme.wrappers import base
+from acme.wrappers import frame_stacking
 import dm_env
 from dm_env import specs
 import numpy as np
@@ -28,7 +29,7 @@ LIVES_INDEX = 1  # Observation index holding the lives count.
 NUM_COLOR_CHANNELS = 3  # Number of color channels in RGB data.
 
 
-class AtariWrapper(dm_env.Environment):
+class AtariWrapper(base.EnvironmentWrapper):
   """Standard "Nature Atari" wrapper for Python environments.
 
   This assumes that the input environment is a dm_env.Environment instance in
@@ -106,15 +107,15 @@ class AtariWrapper(dm_env.Environment):
                            pooled_frames, action_repeats))
 
     if zero_discount_on_life_loss:
-      self._environment = _ZeroDiscountOnLifeLoss(environment)
+      super().__init__(_ZeroDiscountOnLifeLoss(environment))
     else:
-      self._environment = environment
+      super().__init__(environment)
 
     if not max_episode_len:
       max_episode_len = np.inf
 
-    self._frame_stacker = FrameStacker(length=num_stacked_frames)
-    self._num_stacked_frames = num_stacked_frames
+    self._frame_stacker = frame_stacking.FrameStacker(
+        num_frames=num_stacked_frames)
     self._action_repeats = action_repeats
     self._pooled_frames = pooled_frames
     self._scale_dims = scale_dims
@@ -157,15 +158,15 @@ class AtariWrapper(dm_env.Environment):
       pixels_dtype = np.uint8
 
     if self._grayscaling:
-      pixels_spec_shape = (self._height, self._width, self._num_stacked_frames)
+      pixels_spec_shape = (self._height, self._width)
       pixels_spec_name = "grayscale"
     else:
-      pixels_spec_shape = (self._height, self._width, NUM_COLOR_CHANNELS,
-                           self._num_stacked_frames)
+      pixels_spec_shape = (self._height, self._width, NUM_COLOR_CHANNELS)
       pixels_spec_name = "RGB"
 
     pixel_spec = specs.Array(
         shape=pixels_spec_shape, dtype=pixels_dtype, name=pixels_spec_name)
+    pixel_spec = self._frame_stacker.update_spec(pixel_spec)
 
     if self._expose_lives_observation:
       return (pixel_spec,) + self._environment.observation_spec()[1:]
@@ -335,29 +336,7 @@ class AtariWrapper(dm_env.Environment):
     return self._raw_observation
 
 
-class FrameStacker:
-  """Simple class for frame-stacking observations."""
-
-  def __init__(self, length: int):
-    self._stack = None
-    self._length = length
-
-  @property
-  def length(self) -> int:
-    return self._length
-
-  def reset(self):
-    self._stack = None
-
-  def step(self, frame: np.ndarray) -> np.ndarray:
-    if self._stack is None:
-      self._stack = [np.zeros_like(frame) for _ in range(self._length)]
-    self._stack[0][:] = frame
-    self._stack = self._stack[1:] + [self._stack[0]]
-    return np.stack(self._stack, axis=-1)
-
-
-class _ZeroDiscountOnLifeLoss(dm_env.Environment):
+class _ZeroDiscountOnLifeLoss(base.EnvironmentWrapper):
   """Implements soft-termination (zero discount) on life loss."""
 
   def __init__(self, environment: dm_env.Environment):
@@ -369,12 +348,12 @@ class _ZeroDiscountOnLifeLoss(dm_env.Environment):
     Raises:
       ValueError: If the environment does not expose a lives observation.
     """
-    self._env = environment
+    super().__init__(environment)
     self._reset_next_step = True
     self._last_num_lives = None
 
   def reset(self) -> dm_env.TimeStep:
-    timestep = self._env.reset()
+    timestep = self._environment.reset()
     self._reset_next_step = False
     self._last_num_lives = timestep.observation[LIVES_INDEX]
     return timestep
@@ -383,7 +362,7 @@ class _ZeroDiscountOnLifeLoss(dm_env.Environment):
     if self._reset_next_step:
       return self.reset()
 
-    timestep = self._env.step(action)
+    timestep = self._environment.step(action)
     lives = timestep.observation[LIVES_INDEX]
 
     is_life_loss = True
@@ -397,9 +376,3 @@ class _ZeroDiscountOnLifeLoss(dm_env.Environment):
     if is_life_loss:
       return timestep._replace(discount=0.0)
     return timestep
-
-  def observation_spec(self) -> types.NestedSpec:
-    return self._env.observation_spec()
-
-  def action_spec(self) -> specs.DiscreteArray:
-    return self._env.action_spec()

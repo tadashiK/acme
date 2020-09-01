@@ -19,12 +19,11 @@ from typing import Iterator, List, NamedTuple, Tuple
 
 import acme
 from acme.adders import reverb as adders
-from acme.networks import jax as networks
+from acme.jax import networks
+from acme.jax import utils
 from acme.utils import async_utils
 from acme.utils import counting
-from acme.utils import jax_utils
 from acme.utils import loggers
-
 from dm_env import specs
 import haiku as hk
 import jax
@@ -39,7 +38,7 @@ class TrainingState(NamedTuple):
   params: hk.Params
   target_params: hk.Params
   opt_state: optix.OptState
-  step: int
+  steps: int
 
 
 class LearnerOutputs(NamedTuple):
@@ -70,7 +69,7 @@ class DQNLearner(acme.Learner, acme.Saveable):
     """Initializes the learner."""
 
     # Transform network into a pure function.
-    network = hk.transform(network)
+    network = hk.without_apply_rng(hk.transform(network, apply_rng=True))
 
     def loss(params: hk.Params, target_params: hk.Params,
              sample: reverb.ReplaySample):
@@ -112,19 +111,31 @@ class DQNLearner(acme.Learner, acme.Saveable):
       updates, new_opt_state = optimizer.update(gradients, state.opt_state)
       new_params = optix.apply_updates(state.params, updates)
 
+      steps = state.steps + 1
+
+      # Periodically update target networks.
+      target_params = utils.update_periodically(steps,
+                                                self._target_update_period,
+                                                new_params, state.target_params)
+
       new_state = TrainingState(
           params=new_params,
-          target_params=state.target_params,
+          target_params=target_params,
           opt_state=new_opt_state,
-          step=state.step + 1)
+          steps=steps)
 
       outputs = LearnerOutputs(keys=keys, priorities=priorities)
 
       return new_state, outputs
 
+    def update_priorities(outputs: LearnerOutputs):
+      for key, priority in zip(outputs.keys, outputs.priorities):
+        replay_client.mutate_priorities(
+            table=adders.DEFAULT_PRIORITY_TABLE, updates={key: priority})
+
     # Internalise agent components (replay buffer, networks, optimizer).
     self._replay_client = replay_client
-    self._iterator = jax_utils.prefetch(iterator)
+    self._iterator = utils.prefetch(iterator)
 
     # Internalise the hyperparameters.
     self._target_update_period = target_update_period
@@ -135,19 +146,20 @@ class DQNLearner(acme.Learner, acme.Saveable):
 
     # Initialise parameters and optimiser state.
     initial_params = network.init(
-        next(rng), jax_utils.add_batch_dim(jax_utils.zeros_like(obs_spec)))
+        next(rng), utils.add_batch_dim(utils.zeros_like(obs_spec)))
     initial_target_params = network.init(
-        next(rng), jax_utils.add_batch_dim(jax_utils.zeros_like(obs_spec)))
+        next(rng), utils.add_batch_dim(utils.zeros_like(obs_spec)))
     initial_opt_state = optimizer.init(initial_params)
 
     self._state = TrainingState(
         params=initial_params,
         target_params=initial_target_params,
         opt_state=initial_opt_state,
-        step=0)
+        steps=0)
 
     self._forward = jax.jit(network.apply)
     self._sgd_step = jax.jit(sgd_step)
+    self._async_priority_updater = async_utils.AsyncExecutor(update_priorities)
 
   def step(self):
     samples = next(self._iterator)
@@ -158,22 +170,12 @@ class DQNLearner(acme.Learner, acme.Saveable):
     # Update our counts and record it.
     result = self._counter.increment(steps=1)
 
-    # Periodically update target network parameters.
-    if self._state.step % self._target_update_period == 0:
-      self._state = self._state._replace(target_params=self._state.params)
-
     # Update priorities in replay.
     if self._replay_client:
-      self._update_priorities(outputs)
+      self._async_priority_updater.put(outputs)
 
     # Write to logs.
     self._logger.write(result)
-
-  @async_utils.make_async
-  def _update_priorities(self, outputs: LearnerOutputs):
-    for key, priority in zip(outputs.keys, outputs.priorities):
-      self._replay_client.mutate_priorities(
-          table=adders.DEFAULT_PRIORITY_TABLE, updates={key: priority})
 
   def get_variables(self, names: List[str]) -> List[hk.Params]:
     return [self._state.params]

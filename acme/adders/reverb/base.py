@@ -17,13 +17,16 @@
 
 import abc
 import collections
-from typing import Callable, Mapping, NamedTuple, Optional
+from typing import Callable, Iterable, Mapping, NamedTuple, Optional, Union
 
+from acme import specs
 from acme import types
 from acme.adders import base
-
 import dm_env
+import numpy as np
 import reverb
+import tensorflow as tf
+import tree
 
 DEFAULT_PRIORITY_TABLE = 'priority_table'
 
@@ -34,6 +37,7 @@ class Step(NamedTuple):
   action: types.NestedArray
   reward: types.NestedArray
   discount: types.NestedArray
+  start_of_episode: Union[bool, specs.Array, tf.Tensor]
   extras: types.NestedArray
 
 
@@ -43,12 +47,17 @@ class PriorityFnInput(NamedTuple):
   actions: types.NestedArray
   rewards: types.NestedArray
   discounts: types.NestedArray
+  start_of_episode: types.NestedArray
   extras: types.NestedArray
 
 
 # Define the type of a priority function and the mapping from table to function.
 PriorityFn = Callable[['PriorityFnInput'], float]
 PriorityFnMapping = Mapping[str, PriorityFn]
+
+
+def spec_like_to_tensor_spec(paths: Iterable[str], spec: specs.Array):
+  return tf.TensorSpec.from_spec(spec, name='/'.join(str(p) for p in paths))
 
 
 class ReverbAdder(base.Adder):
@@ -98,6 +107,7 @@ class ReverbAdder(base.Adder):
     # (generally SAR tuples) and one additional dangling observation.
     self._buffer = collections.deque(maxlen=buffer_size)
     self._next_observation = None
+    self._start_of_episode = False
 
   @property
   def _writer(self) -> reverb.Writer:
@@ -135,6 +145,7 @@ class ReverbAdder(base.Adder):
 
     # Record the next observation.
     self._next_observation = timestep.observation
+    self._start_of_episode = True
 
   def add(self,
           action: types.NestedArray,
@@ -144,24 +155,67 @@ class ReverbAdder(base.Adder):
     if self._next_observation is None:
       raise ValueError('adder.add_first must be called before adder.add.')
 
+    discount = next_timestep.discount
+    if next_timestep.last():
+      # Terminal timesteps created by dm_env.termination() will have a scalar
+      # discount of 0.0. This may not match the array shape / nested structure
+      # of the previous timesteps' discounts. The below will match
+      # next_timestep.discount's shape/structure to that of
+      # self._buffer[-1].discount.
+      if self._buffer and not tree.is_nested(next_timestep.discount):
+        discount = tree.map_structure(
+            lambda d: np.broadcast_to(next_timestep.discount, np.shape(d)),
+            self._buffer[-1].discount)
+
     # Add the timestep to the buffer.
     self._buffer.append(
         Step(
             observation=self._next_observation,
             action=action,
             reward=next_timestep.reward,
-            discount=next_timestep.discount,
+            discount=discount,
+            start_of_episode=self._start_of_episode,
             extras=extras,
         ))
 
     # Record the next observation and write.
     self._next_observation = next_timestep.observation
+    self._start_of_episode = False
     self._write()
 
     # Write the last "dangling" observation.
     if next_timestep.last():
       self._write_last()
       self.reset()
+
+  @classmethod
+  def signature(cls, environment_spec: specs.EnvironmentSpec,
+                extras_spec: types.NestedSpec = ()):
+    """This is a helper method for generating signatures for Reverb tables.
+
+    Signatures are useful for validating data types and shapes, see Reverb's
+    documentation for details on how they are used.
+
+    Args:
+      environment_spec: A `specs.EnvironmentSpec` whose fields are nested
+        structures with leaf nodes that have `.shape` and `.dtype` attributes.
+        This should come from the environment that will be used to generate
+        the data inserted into the Reverb table.
+      extras_spec: A nested structure with leaf nodes that have `.shape` and
+        `.dtype` attributes. The structure (and shapes/dtypes) of this must
+        be the same as the `extras` passed into `ReverbAdder.add`.
+
+    Returns:
+      A `Step` whose leaf nodes are `tf.TensorSpec` objects.
+    """
+    spec_step = Step(
+        observation=environment_spec.observations,
+        action=environment_spec.actions,
+        reward=environment_spec.rewards,
+        discount=environment_spec.discounts,
+        start_of_episode=specs.Array(shape=(), dtype=bool),
+        extras=extras_spec)
+    return tree.map_structure_with_path(spec_like_to_tensor_spec, spec_step)
 
   @abc.abstractmethod
   def _write(self):

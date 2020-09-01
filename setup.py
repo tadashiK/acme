@@ -15,7 +15,10 @@
 
 """Install script for setuptools."""
 
+import datetime
 from importlib import util as import_util
+import sys
+
 from setuptools import find_packages
 from setuptools import setup
 
@@ -24,13 +27,13 @@ _metadata = import_util.module_from_spec(spec)
 spec.loader.exec_module(_metadata)
 
 reverb_requirements = [
-    'dm-reverb-nightly==0.1.0.dev20200605',
-    'tf-nightly==2.3.0.dev20200604',
+    'dm-reverb-nightly==0.1.0.dev20200708',
+    'tf-nightly==2.4.0.dev20200708',
 ]
 
 tf_requirements = [
-    'tf-nightly==2.3.0.dev20200604',
-    'tfp-nightly',
+    'tf-nightly==2.4.0.dev20200708',
+    'tfp-nightly==0.12.0.dev20200717',
     'dm-sonnet',
     'trfl',
 ]
@@ -38,8 +41,9 @@ tf_requirements = [
 jax_requirements = [
     'jax',
     'jaxlib',
-    'dm-haiku @ git+git://github.com/deepmind/dm-haiku.git#egg=dm-haiku',
+    'dm-haiku',
     'rlax @ git+git://github.com/deepmind/rlax.git#egg=rlax',
+    'dataclasses',  # Back-port for Python 3.6.
 ]
 
 env_requirements = [
@@ -58,9 +62,17 @@ testing_requirements = [
 long_description = 'For more information see our '
 long_description += '[github repository](https://github.com/deepmind/acme).'
 
+# Get the version from metadata.
+version = _metadata.__version__
+
+# If we're releasing a nightly/dev version append to the version string.
+if '--nightly' in sys.argv:
+  sys.argv.remove('--nightly')
+  version += '.dev' + datetime.datetime.now().strftime('%Y%m%d')
+
 setup(
     name='dm-acme',
-    version=_metadata.__version__,
+    version=version,
     description='A Python library for Reinforcement Learning.',
     long_description=long_description,
     long_description_content_type='text/markdown',

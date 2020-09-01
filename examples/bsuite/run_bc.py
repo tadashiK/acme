@@ -20,24 +20,20 @@ import operator
 
 from absl import app
 from absl import flags
-
 import acme
 from acme import specs
 from acme import types
-from acme.agents import actors_tf2
-from acme.agents.bc import learning
-from acme.agents.dqfd import bsuite_demonstrations
+from acme.agents.tf import actors
+from acme.agents.tf.bc import learning
+from acme.agents.tf.dqfd import bsuite_demonstrations
+from acme.tf import utils as tf2_utils
 from acme.utils import counting
 from acme.utils import loggers
-from acme.utils import tf2_utils
 from acme.wrappers import single_precision
-
 import bsuite
-
 import reverb
 import sonnet as snt
 import tensorflow as tf
-
 import tree
 import trfl
 
@@ -117,8 +113,13 @@ def _n_step_transition_from_episode(observations: types.NestedTensor,
   key = tf.constant(0, tf.uint64)
   probability = tf.constant(1.0, tf.float64)
   table_size = tf.constant(1, tf.int64)
+  priority = tf.constant(1.0, tf.float64)
   info = reverb.SampleInfo(
-      key=key, probability=probability, table_size=table_size)
+      key=key,
+      probability=probability,
+      table_size=table_size,
+      priority=priority,
+  )
 
   return reverb.ReplaySample(info=info, data=(o_t, a_t, r_t, d_t, o_tp1))
 
@@ -165,7 +166,7 @@ def main(_):
   learner_counter = counting.Counter(counter, prefix='learner')
 
   # Create the actor which defines how we take actions.
-  evaluation_network = actors_tf2.FeedForwardActor(evaluator_network)
+  evaluation_network = actors.FeedForwardActor(evaluator_network)
 
   eval_loop = acme.EnvironmentLoop(
       environment=environment,

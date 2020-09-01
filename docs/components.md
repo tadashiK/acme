@@ -73,7 +73,7 @@ tfd = tfp.distributions
 
 While custom Sonnet modules can be implemented and used directly, Acme also
 provides a number of useful network primitives which are tailored to RL tasks;
-these can be imported from `acme.networks`, see [networks] for more details.
+these can be imported from `acme.tf.networks`, see [networks] for more details.
 These primitives can be combined using `snt.Sequential`, or `snt.DeepRNN` when
 stacking network modules with state.
 
@@ -180,7 +180,7 @@ agent = dmpo.DMPO(
 In this case, the `policy_` and `critic_network` act as heads on top of the
 shared visual torso.
 
-[networks]: ../acme/networks/
+[networks]: ../acme/tf/networks/
 [sonnet]: https://github.com/deepmind/sonnet/
 
 ## Internal components
@@ -225,32 +225,33 @@ Also implemented (and useful within the losses mentioned above) are:
 An `Adder` packs together data to send to the replay buffer, and potentially
 does some reductions/transformations to this data in the process.
 
-All Acme `Adder`s can be interacted through their `add()`, `end_episode()`, or
-`add_async()`, `end_episode_async()`, and `reset()` methods.
+All Acme `Adder`s can be interacted through their `add()`, `add_first()`, and
+`reset()` methods.
 
-The `add()` method takes tuples of the form: `(state_t, action_t, reward_t+1,
-discount_t+1, [extras_t])`
+The `add()` method takes actions, timesteps, and potentially some extras and
+adds the `action`, `observation`, `reward`, `discount`, `extra` fields to the
+buffer.
 
-As a result of the common need in RL algorithms to have data of the form
-`(state,(a, r, d...), *next_state*)`, available for learning, at the end of an
-episode, one needs to add the final `next_state` to the replay buffer without
-adding any new actions, rewards etc. The `end_episode()` method of an `Adder`
-handles this for you, usually by padding the other parts of the tuple
-appropriately and simply adding the final `next_state`.
+The `add_first()` method takes the first timestep of an episode and adds it to
+the buffer, automatically padding the empty `action` `reward` `discount`, and
+`extra` fields that don't exist at the first timestep of an episode.
+
+The `reset` method clears the buffer.
 
 Example usage of an adder:
 
 ```python
+# Reset the environment and add the first observation.
 timestep = env.reset()
+adder.add_first(timestep)
+
 while not timestep.last():
+  # Generate an action from the policy and step the environment.
   action = my_policy(timestep)
-  new_timestep = env.step(action)
-  # Adds a (s, a, r, d) tuple to the adder's internal buffer.
-  adder.add(timestep.observation, action, new_timestep.reward,
-            new_timestep.discount)
-  timestep = new_timestep
-# When the episode ends, tell the adder about the final arrival state.
-adder.end_episode(new_timestep.observation)
+  timestep = env.step(action)
+
+  # Add the action and the resulting timestep.
+  adder.add(action, next_timestep=timestep)
 ```
 
 ### ReverbAdders
@@ -269,11 +270,15 @@ experiences to a Reverb table. The `ReverbAdder`s provided include:
 
     Where N is 1, the transitions are of the form:
 
-        `(s_t, a_t, r_t, d_t, s_{t+1}, e_t)`
+    ```
+    (s_t, a_t, r_t, d_t, s_{t+1}, e_t)
+    ```
 
     For N greater than 1, transitions are of the form:
 
-        `(s_t, a_t, R_{t:t+n}, D_{t:t+n}, s_{t+n}, e_t)`,
+    ```
+    (s_t, a_t, R_{t:t+n}, D_{t:t+n}, s_{t+n}, e_t),
+    ```
 
     Transitions can be stored as sequences or episodes.
 
@@ -288,9 +293,6 @@ experiences to a Reverb table. The `ReverbAdder`s provided include:
      s_T, a_T, r_T, 0., e_T)
     ```
 
-*   `PaddedEpisodeAdder` which is the same as `EpisodeAdder` with padding to
-    `max_sequence_length`
-
 *   `SequenceAdder` which adds sequences of fixed `sequence_length` n of the
     form:
 
@@ -303,13 +305,13 @@ experiences to a Reverb table. The `ReverbAdder`s provided include:
        s_n, a_n, r_n, d_n, e_n)
     ```
 
-    sequences can be overlapping (if the `period` parameter = `sequence_length`
-    n) or non-overlapping (if `period < sequence_length`)
+    sequences can be overlapping (if `period < sequence_length`) or
+    non-overlapping (if `period >= sequence_length`)
 
 ### [Loggers](../acme/utils/loggers/)
 
 Acme contains several loggers for writing out data to common places,
-based on the absract `Logger` class, all with `write()` methods.<br><br>
+based on the abstract `Logger` class, all with `write()` methods.<br><br>
 NOTE: By default, loggers will immediately output all data passed through `write()` unless given a nonzero value for the `time_delta` argument when constructing a logger representing the number of seconds between logger outputs. <br>
 
 #### [Terminal Logger](../acme/utils/loggers/terminal.py)
@@ -334,7 +336,7 @@ csv_logger = loggers.CSVLogger(logdir='logged_data', label='my_csv_file')
 csv_logger.write({'step': 0, 'reward': 0.0})
 ```
 
-### [Tensorflow savers](../acme/utils/tf2_savers.py)
+### [Tensorflow savers](../acme/tf/savers.py)
 
 To save trained TensorFlow models, we can *checkpoint* or *snapshot*
 them. <br>
@@ -345,7 +347,7 @@ Both *checkpointing* and *snapshotting* are ways to save and restore model state
 With checkpoints, you have to first re-build the exact graph, then restore the
   checkpoint. They are useful to have while running experiments, in case the
   experiment gets interrupted/preempted and has to be restored to continue the
-  \experiment run without losing the experiment state.<br>
+  experiment run without losing the experiment state.<br>
 
 Snapshots re-build the graph internally, so all you have to do is restore the
   snapshot.<br>

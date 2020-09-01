@@ -18,6 +18,7 @@
 from absl.testing import absltest
 
 from acme import specs
+from acme.adders import reverb as adders
 from acme.datasets import reverb as reverb_dataset
 from acme.testing import fakes
 
@@ -66,17 +67,11 @@ class DatasetsTest(absltest.TestCase):
     super(DatasetsTest, cls).setUpClass()
     cls._server = _reverb_server()
     cls._client = _reverb_client(cls._server.port)
-
-  def setUp(self):
-    super(DatasetsTest, self).setUp()
-    # We need to create a new reverb.TFClient because the tf.Graph has
-    # been reset
-    self._tf_client = _reverb_tf_client(self._server.port)
+    cls._server_address = cls._client.server_address
 
   @property
-  def tf_client(self):
-    # Use first client for single client tests.
-    return self._tf_client
+  def server_address(self):
+    return self._server_address
 
   def tearDown(self):
     super(DatasetsTest, self).tearDown()
@@ -91,10 +86,16 @@ class DatasetsTest(absltest.TestCase):
     environment = fakes.ContinuousEnvironment()
     environment_spec = specs.make_environment_spec(environment)
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client, environment_spec=environment_spec)
+        server_address=self.server_address, environment_spec=environment_spec)
 
-    self.assertTrue(
-        _check_specs(tuple(environment_spec), dataset.element_spec.data))
+    expected_spec = adders.Step(
+        observation=environment_spec.observations,
+        action=environment_spec.actions,
+        reward=environment_spec.rewards,
+        discount=environment_spec.discounts,
+        start_of_episode=specs.Array(shape=(), dtype=bool),
+        extras=())
+    self.assertTrue(_check_specs(expected_spec, dataset.element_spec.data))
 
   def test_make_dataset_nested_specs(self):
     environment_spec = specs.EnvironmentSpec(
@@ -107,16 +108,23 @@ class DatasetsTest(absltest.TestCase):
         discounts=specs.BoundedArray((), 'float32', minimum=0., maximum=1.))
 
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client, environment_spec=environment_spec)
+        server_address=self.server_address, environment_spec=environment_spec)
 
-    self.assertTrue(
-        _check_specs(tuple(environment_spec), dataset.element_spec.data))
+    expected_spec = adders.Step(
+        observation=environment_spec.observations,
+        action=environment_spec.actions,
+        reward=environment_spec.rewards,
+        discount=environment_spec.discounts,
+        start_of_episode=specs.Array(shape=(), dtype=bool),
+        extras=())
+
+    self.assertTrue(_check_specs(expected_spec, dataset.element_spec.data))
 
   def test_make_dataset_transition_adder(self):
     environment = fakes.ContinuousEnvironment()
     environment_spec = specs.make_environment_spec(environment)
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client,
+        server_address=self.server_address,
         environment_spec=environment_spec,
         transition_adder=True)
 
@@ -131,7 +139,7 @@ class DatasetsTest(absltest.TestCase):
     environment = fakes.ContinuousEnvironment()
     environment_spec = specs.make_environment_spec(environment)
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client,
+        server_address=self.server_address,
         environment_spec=environment_spec,
         batch_size=batch_size)
 
@@ -140,15 +148,22 @@ class DatasetsTest(absltest.TestCase):
 
     expected_spec = tree.map_structure(make_tensor_spec, environment_spec)
 
-    self.assertTrue(
-        _check_specs(tuple(expected_spec), dataset.element_spec.data))
+    expected_spec = adders.Step(
+        observation=expected_spec.observations,
+        action=expected_spec.actions,
+        reward=expected_spec.rewards,
+        discount=expected_spec.discounts,
+        start_of_episode=specs.Array(shape=(batch_size,), dtype=bool),
+        extras=())
+
+    self.assertTrue(_check_specs(expected_spec, dataset.element_spec.data))
 
   def test_make_dataset_with_sequence_length_size(self):
     sequence_length = 6
     environment = fakes.ContinuousEnvironment()
     environment_spec = specs.make_environment_spec(environment)
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client,
+        server_address=self.server_address,
         environment_spec=environment_spec,
         sequence_length=sequence_length)
 
@@ -158,8 +173,15 @@ class DatasetsTest(absltest.TestCase):
 
     expected_spec = tree.map_structure(make_tensor_spec, environment_spec)
 
-    self.assertTrue(
-        _check_specs(tuple(expected_spec), dataset.element_spec.data))
+    expected_spec = adders.Step(
+        observation=expected_spec.observations,
+        action=expected_spec.actions,
+        reward=expected_spec.rewards,
+        discount=expected_spec.discounts,
+        start_of_episode=specs.Array(shape=(sequence_length,), dtype=bool),
+        extras=())
+
+    self.assertTrue(_check_specs(expected_spec, dataset.element_spec.data))
 
   def test_make_dataset_with_sequence_length_and_batch_size(self):
     sequence_length = 6
@@ -167,7 +189,7 @@ class DatasetsTest(absltest.TestCase):
     environment = fakes.ContinuousEnvironment()
     environment_spec = specs.make_environment_spec(environment)
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client,
+        server_address=self.server_address,
         environment_spec=environment_spec,
         batch_size=batch_size,
         sequence_length=sequence_length)
@@ -181,8 +203,16 @@ class DatasetsTest(absltest.TestCase):
 
     expected_spec = tree.map_structure(make_tensor_spec, environment_spec)
 
-    self.assertTrue(
-        _check_specs(tuple(expected_spec), dataset.element_spec.data))
+    expected_spec = adders.Step(
+        observation=expected_spec.observations,
+        action=expected_spec.actions,
+        reward=expected_spec.rewards,
+        discount=expected_spec.discounts,
+        start_of_episode=specs.Array(
+            shape=(batch_size, sequence_length), dtype=bool),
+        extras=())
+
+    self.assertTrue(_check_specs(expected_spec, dataset.element_spec.data))
 
   def test_make_dataset_with_variable_length_instances(self):
     """Dataset with variable length instances should have shapes with None."""
@@ -193,7 +223,7 @@ class DatasetsTest(absltest.TestCase):
         discounts=specs.BoundedArray((), 'float32', minimum=0., maximum=1.))
 
     dataset = reverb_dataset.make_dataset(
-        client=self.tf_client,
+        server_address=self.server_address,
         environment_spec=environment_spec,
         convert_zero_size_to_none=True)
 

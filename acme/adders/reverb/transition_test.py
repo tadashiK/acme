@@ -17,13 +17,10 @@
 
 from absl.testing import absltest
 from absl.testing import parameterized
-
 from acme.adders.reverb import test_utils
 from acme.adders.reverb import transition as adders
-
 import dm_env
 import numpy as np
-import tree
 
 # Define the main set of test cases; these are given as parameterized tests to
 # the test_adder method and describe a trajectory to add to replay and the
@@ -42,9 +39,9 @@ TEST_CASES = [
             (0, dm_env.termination(reward=1.0, observation=4)),
         ),
         expected_transitions=(
-            (1, 0, 0.0, 1.0, 2, ()),
-            (2, 0, 0.0, 1.0, 3, ()),
-            (3, 0, 1.0, 0.0, 4, ()),
+            (1, 0, 0.0, 1.0, 2),
+            (2, 0, 0.0, 1.0, 3),
+            (3, 0, 1.0, 0.0, 4),
         )),
     dict(
         testcase_name='OneStepDict',
@@ -57,9 +54,39 @@ TEST_CASES = [
             (0, dm_env.termination(reward=1.0, observation={'foo': 4})),
         ),
         expected_transitions=(
-            ({'foo': 1}, 0, 0.0, 1.0, {'foo': 2}, ()),
-            ({'foo': 2}, 0, 0.0, 1.0, {'foo': 3}, ()),
-            ({'foo': 3}, 0, 1.0, 0.0, {'foo': 4}, ()),
+            ({'foo': 1}, 0, 0.0, 1.0, {'foo': 2}),
+            ({'foo': 2}, 0, 0.0, 1.0, {'foo': 3}),
+            ({'foo': 3}, 0, 1.0, 0.0, {'foo': 4}),
+        )),
+    dict(
+        testcase_name='OneStepExtras',
+        n_step=1,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (
+                0,
+                dm_env.transition(reward=0.0, observation=2),
+                {'state': 0},
+
+            ),
+            (
+                0,
+                dm_env.transition(reward=0.0, observation=3),
+                {'state': 1},
+
+            ),
+            (
+                0,
+                dm_env.termination(reward=1.0, observation=4),
+                {'state': 2},
+
+            ),
+        ),
+        expected_transitions=(
+            (1, 0, 0.0, 1.0, 2, {'state': 0}),
+            (2, 0, 0.0, 1.0, 3, {'state': 1}),
+            (3, 0, 1.0, 0.0, 4, {'state': 2}),
         )),
     dict(
         testcase_name='TwoStep',
@@ -72,10 +99,178 @@ TEST_CASES = [
             (0, dm_env.termination(reward=1.0, observation=4)),
         ),
         expected_transitions=(
-            (1, 0, 1.0, 0.50, 2, ()),
-            (1, 0, 1.5, 0.25, 3, ()),
-            (2, 0, 1.5, 0.00, 4, ()),
-            (3, 0, 1.0, 0.00, 4, ()),
+            (1, 0, 1.0, 0.50, 2),
+            (1, 0, 1.5, 0.25, 3),
+            (2, 0, 1.5, 0.00, 4),
+            (3, 0, 1.0, 0.00, 4),
+        )),
+    dict(
+        testcase_name='TwoStepStructuredReward',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (0, dm_env.transition(reward=(1.0, 2.0),
+                                  observation=2,
+                                  discount=0.5)),
+            (0, dm_env.transition(reward=(1.0, 2.0),
+                                  observation=3,
+                                  discount=0.5)),
+            (0, dm_env.termination(reward=(1.0, 2.0),
+                                   observation=4)),
+        ),
+        expected_transitions=(
+            (1, 0, (1.0, 2.0), (0.50, 0.50), 2),
+            (1, 0, (1.5, 3.0), (0.25, 0.25), 3),
+            (2, 0, (1.5, 3.0), (0.00, 0.00), 4),
+            (3, 0, (1.0, 2.0), (0.00, 0.00), 4),
+        )),
+    dict(
+        testcase_name='TwoStepNDArrayReward',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (0, dm_env.transition(reward=np.array((1.0, 2.0)),
+                                  observation=2,
+                                  discount=0.5)),
+            (0, dm_env.transition(reward=np.array((1.0, 2.0)),
+                                  observation=3,
+                                  discount=0.5)),
+            (0, dm_env.termination(reward=np.array((1.0, 2.0)),
+                                   observation=4)),
+        ),
+        expected_transitions=(
+            (1, 0, np.array((1.0, 2.0)), np.array((0.50, 0.50)), 2),
+            (1, 0, np.array((1.5, 3.0)), np.array((0.25, 0.25)), 3),
+            (2, 0, np.array((1.5, 3.0)), np.array((0.00, 0.00)), 4),
+            (3, 0, np.array((1.0, 2.0)), np.array((0.00, 0.00)), 4),
+        )),
+    dict(
+        testcase_name='TwoStepStructuredDiscount',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (0, dm_env.transition(reward=1.0,
+                                  observation=2,
+                                  discount={'a': 0.5, 'b': 0.1})),
+            (0, dm_env.transition(reward=1.0,
+                                  observation=3,
+                                  discount={'a': 0.5, 'b': 0.1})),
+            (0, dm_env.termination(reward=1.0, observation=4)),
+        ),
+        expected_transitions=(
+            (1, 0, {'a': 1.0, 'b': 1.0}, {'a': 0.50, 'b': 0.10}, 2),
+            (1, 0, {'a': 1.5, 'b': 1.1}, {'a': 0.25, 'b': 0.01}, 3),
+            (2, 0, {'a': 1.5, 'b': 1.1}, {'a': 0.00, 'b': 0.00}, 4),
+            (3, 0, {'a': 1.0, 'b': 1.0}, {'a': 0.00, 'b': 0.00}, 4),
+        )),
+    dict(
+        testcase_name='TwoStepNDArrayDiscount',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (0, dm_env.transition(reward=1.0,
+                                  observation=2,
+                                  discount=np.array((0.5, 0.1)))),
+            (0, dm_env.transition(reward=1.0,
+                                  observation=3,
+                                  discount=np.array((0.5, 0.1)))),
+            (0, dm_env.termination(reward=1.0, observation=4)),
+        ),
+        expected_transitions=(
+            (1, 0, np.array((1.0, 1.0)), np.array((0.50, 0.10)), 2),
+            (1, 0, np.array((1.5, 1.1)), np.array((0.25, 0.01)), 3),
+            (2, 0, np.array((1.5, 1.1)), np.array((0.00, 0.00)), 4),
+            (3, 0, np.array((1.0, 1.0)), np.array((0.00, 0.00)), 4),
+        )),
+    dict(
+        testcase_name='TwoStepBroadcastedNDArrays',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (0, dm_env.transition(reward=np.array([[1.0, 2.0]]),
+                                  observation=2,
+                                  discount=np.array([[0.5], [0.1]]))),
+            (0, dm_env.transition(reward=np.array([[1.0, 2.0]]),
+                                  observation=3,
+                                  discount=np.array([[0.5], [0.1]]))),
+            (0, dm_env.termination(reward=np.array([[1.0, 2.0]]),
+                                   observation=4)),
+        ),
+        expected_transitions=(
+            (1, 0,
+             np.array([[1.0, 2.0], [1.0, 2.0]]),
+             np.array([[0.50], [0.10]]),
+             2),
+            (1, 0,
+             np.array([[1.5, 3.0], [1.1, 2.2]]),
+             np.array([[0.25], [0.01]]),
+             3),
+            (2, 0,
+             np.array([[1.5, 3.0], [1.1, 2.2]]),
+             np.array([[0.00], [0.00]]),
+             4),
+            (3, 0,
+             np.array([[1.0, 2.0], [1.0, 2.0]]),
+             np.array([[0.00], [0.00]]),
+             4),
+        )),
+    dict(
+        testcase_name='TwoStepStructuredBroadcastedNDArrays',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (0, dm_env.transition(reward={'a': np.array([[1.0, 2.0]])},
+                                  observation=2,
+                                  discount=np.array([[0.5], [0.1]]))),
+            (0, dm_env.transition(reward={'a': np.array([[1.0, 2.0]])},
+                                  observation=3,
+                                  discount=np.array([[0.5], [0.1]]))),
+            (0, dm_env.termination(reward={'a': np.array([[1.0, 2.0]])},
+                                   observation=4)),
+        ),
+        expected_transitions=(
+            (1, 0, {'a': np.array([[1.0, 2.0], [1.0, 2.0]])},
+             {'a': np.array([[0.50], [0.10]])}, 2),
+            (1, 0, {'a': np.array([[1.5, 3.0], [1.1, 2.2]])},
+             {'a': np.array([[0.25], [0.01]])}, 3),
+            (2, 0, {'a': np.array([[1.5, 3.0], [1.1, 2.2]])},
+             {'a': np.array([[0.00], [0.00]])}, 4),
+            (3, 0, {'a': np.array([[1.0, 2.0], [1.0, 2.0]])},
+             {'a': np.array([[0.00], [0.00]])}, 4),
+        )),
+    dict(
+        testcase_name='TwoStepWithExtras',
+        n_step=2,
+        additional_discount=1.0,
+        first=dm_env.restart(1),
+        steps=(
+            (
+                0,
+                dm_env.transition(reward=1.0, observation=2, discount=0.5),
+                {'state': 0},
+            ),
+            (
+                0,
+                dm_env.transition(reward=1.0, observation=3, discount=0.5),
+                {'state': 1},
+            ),
+            (
+                0,
+                dm_env.termination(reward=1.0, observation=4),
+                {'state': 2},
+            ),
+        ),
+        expected_transitions=(
+            (1, 0, 1.0, 0.50, 2, {'state': 0}),
+            (1, 0, 1.5, 0.25, 3, {'state': 0}),
+            (2, 0, 1.5, 0.00, 4, {'state': 1}),
+            (3, 0, 1.0, 0.00, 4, {'state': 2}),
         )),
     dict(
         testcase_name='ThreeStepDiscounted',
@@ -88,11 +283,11 @@ TEST_CASES = [
             (0, dm_env.termination(reward=1.0, observation=4)),
         ),
         expected_transitions=(
-            (1, 0, 1.00, 0.5, 2, ()),
-            (1, 0, 1.20, 0.1, 3, ()),
-            (1, 0, 1.24, 0.0, 4, ()),
-            (2, 0, 1.20, 0.0, 4, ()),
-            (3, 0, 1.00, 0.0, 4, ()),
+            (1, 0, 1.00, 0.5, 2),
+            (1, 0, 1.20, 0.1, 3),
+            (1, 0, 1.24, 0.0, 4),
+            (2, 0, 1.20, 0.0, 4),
+            (3, 0, 1.00, 0.0, 4),
         )),
     dict(
         testcase_name='ThreeStepVaryingReward',
@@ -106,54 +301,29 @@ TEST_CASES = [
             (0, dm_env.termination(reward=7.0, observation=5)),
         ),
         expected_transitions=(
-            (1, 0, 2, 1.00, 2, ()),
-            (1, 0, 2 + 0.5 * 3, 0.50, 3, ()),
-            (1, 0, 2 + 0.5 * 3 + 0.25 * 5, 0.25, 4, ()),
-            (2, 0, 3 + 0.5 * 5 + 0.25 * 7, 0.00, 5, ()),
-            (3, 0, 5 + 0.5 * 7, 0.00, 5, ()),
-            (4, 0, 7, 0.00, 5, ()),
+            (1, 0, 2, 1.00, 2),
+            (1, 0, 2 + 0.5 * 3, 0.50, 3),
+            (1, 0, 2 + 0.5 * 3 + 0.25 * 5, 0.25, 4),
+            (2, 0, 3 + 0.5 * 5 + 0.25 * 7, 0.00, 5),
+            (3, 0, 5 + 0.5 * 7, 0.00, 5),
+            (4, 0, 7, 0.00, 5),
         ))
 ]
 
 
-class NStepTransitionAdderTest(parameterized.TestCase):
+class NStepTransitionAdderTest(test_utils.AdderTestMixin,
+                               parameterized.TestCase):
 
   @parameterized.named_parameters(*TEST_CASES)
   def test_adder(self, n_step, additional_discount, first, steps,
                  expected_transitions):
-    # Create a fake client to record our writes and use it in the adder.
-    client = test_utils.FakeClient()
-    adder = adders.NStepTransitionAdder(client, n_step, additional_discount)
-
-    # Add all the data up to the final step.
-    adder.add_first(first)
-    for step in steps[:-1]:
-      adder.add(*step)
-
-    # Make sure the writer has been created but not closed.
-    self.assertLen(client.writers, 1)
-    self.assertFalse(client.writers[0].closed)
-
-    # Add the final step.
-    adder.add(*steps[-1])
-
-    # Ending the episode should close the writer. No new writer should yet have
-    # been created as it is constructed lazily.
-    self.assertLen(client.writers, 1)
-    self.assertTrue(client.writers[0].closed)
-
-    # Make sure our expected and observed transitions match.
-    observed_transitions = list(p[1][0] for p in client.writers[0].priorities)
-    for exp, obs in zip(expected_transitions, observed_transitions):
-      tree.map_structure(np.testing.assert_array_almost_equal, exp, obs)
-
-    # Add the start of a second trajectory.
-    adder.add_first(first)
-    adder.add(*steps[0])
-
-    # Make sure this creates an open writer.
-    self.assertLen(client.writers, 2)
-    self.assertFalse(client.writers[1].closed)
+    adder = adders.NStepTransitionAdder(self.client, n_step,
+                                        additional_discount)
+    super().run_test_adder(
+        adder=adder,
+        first=first,
+        steps=steps,
+        expected_items=expected_transitions)
 
 
 if __name__ == '__main__':
